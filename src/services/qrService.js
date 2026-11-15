@@ -19,6 +19,18 @@ class QRService {
   }
 
   /**
+   * Generate an Android App compatible QR payload
+   * Matches the On_Time_Arrival app format: { kid, phone, school }
+   */
+  generateAppQRPayload({ kid, phone, school }) {
+    return JSON.stringify({
+      kid: kid || '',
+      phone: phone || '',
+      school: school || ''
+    });
+  }
+
+  /**
    * Generate a tamper-proof signed QR payload token
    * Format: base64(userId|timestamp|signature)
    */
@@ -32,24 +44,78 @@ class QRService {
 
   /**
    * Verify a scanned QR payload token
+   * Supports:
+   * 1. Android App JSON format: {"kid":"...", "phone":"...", "school":"..."}
+   * 2. Signed HMAC token: base64(userId:timestamp:signature)
+   * 3. Plain userId string
    */
   verifyToken(token) {
     try {
-      if (!token || typeof token !== 'string') {
-        return { valid: false, reason: 'Empty or invalid QR code token' };
+      if (!token) {
+        return { valid: false, reason: 'Empty QR code token or data' };
       }
 
-      // Check if it's base64 encoded or direct userId fallback
+      // If token is already an object (parsed JSON from app)
+      if (typeof token === 'object') {
+        if (token.kid || token.phone || token.school) {
+          return {
+            valid: true,
+            isAppQR: true,
+            kid: token.kid || 'Student',
+            phone: token.phone || '',
+            school: token.school || 'School Checkpoint',
+            metadata: token
+          };
+        }
+      }
+
+      let strToken = String(token).trim();
+
+      // Check if it's the Android App's JSON format: {"kid": "...", "phone": "...", "school": "..."}
+      if (strToken.startsWith('{') && strToken.endsWith('}')) {
+        try {
+          const parsed = JSON.parse(strToken);
+          if (parsed && (parsed.kid || parsed.phone || parsed.school)) {
+            return {
+              valid: true,
+              isAppQR: true,
+              kid: parsed.kid || 'Student',
+              phone: parsed.phone || '',
+              school: parsed.school || 'School Checkpoint',
+              metadata: parsed
+            };
+          }
+        } catch (e) {
+          // not valid JSON, continue with other checks
+        }
+      }
+
+      // Check if it's base64 encoded
       let rawPayload = '';
       try {
-        rawPayload = Buffer.from(token, 'base64').toString('utf8');
+        const decoded = Buffer.from(strToken, 'base64').toString('utf8');
+        // If decoded is valid JSON
+        if (decoded.startsWith('{') && decoded.endsWith('}')) {
+          const parsed = JSON.parse(decoded);
+          if (parsed && (parsed.kid || parsed.phone || parsed.school)) {
+            return {
+              valid: true,
+              isAppQR: true,
+              kid: parsed.kid || 'Student',
+              phone: parsed.phone || '',
+              school: parsed.school || 'School Checkpoint',
+              metadata: parsed
+            };
+          }
+        }
+        rawPayload = decoded;
       } catch (e) {
-        rawPayload = token;
+        rawPayload = strToken;
       }
 
-      // If user directly scanned their plain userId (for development ease or direct NFC/card ID)
+      // If user directly scanned their plain userId (e.g. USR-...)
       if (rawPayload.indexOf(':') === -1) {
-        const userExists = db.findOne('users', u => u.id === rawPayload);
+        const userExists = db.findOne('users', u => u.id === rawPayload || u.phone === rawPayload || u.guardianPhone === rawPayload);
         if (userExists) {
           return {
             valid: true,
@@ -89,16 +155,16 @@ class QRService {
   async generateQRCodeDataURL(payload, options = {}) {
     const defaultOptions = {
       errorCorrectionLevel: 'M',
-      margin: 2,
-      width: 300,
+      margin: 1,
+      width: 400,
       color: {
-        dark: '#1e293b', // slate-800
-        light: '#ffffff'
+        dark: '#14213D', // Match On_Time_Arrival app navy color (0xFF14213D)
+        light: '#FFFFFF'
       },
       ...options
     };
 
-    return await QRCode.toDataURL(payload, defaultOptions);
+    return await QRCode.toDataURL(typeof payload === 'object' ? JSON.stringify(payload) : payload, defaultOptions);
   }
 
   /**
@@ -110,16 +176,23 @@ class QRService {
       throw new Error(`User with ID ${userId} not found`);
     }
 
-    const token = this.generateToken(userId);
-    const qrDataUrl = await this.generateQRCodeDataURL(token);
+    // App-compatible payload: { kid, phone, school }
+    const appPayload = {
+      kid: user.name,
+      phone: user.guardianPhone || user.phone,
+      school: user.institution || 'School'
+    };
+
+    const qrDataUrl = await this.generateQRCodeDataURL(appPayload);
 
     return {
       userId: user.id,
       userName: user.name,
       userPhone: user.phone,
       guardianPhone: user.guardianPhone,
+      institution: user.institution,
       expectedArrivalTime: user.expectedArrivalTime || config.ontime.defaultExpectedArrivalTime,
-      token,
+      appPayload,
       qrDataUrl,
       generatedAt: new Date().toISOString()
     };

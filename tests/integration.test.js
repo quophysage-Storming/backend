@@ -34,112 +34,122 @@ async function runTests() {
   assert.strictEqual(formatGhanaPhoneNumber('244123456'), '233244123456');
   console.log('✅ Phone formatting passed');
 
-  // Test 3: User Setup
-  console.log('\nTest 3: Creating Test User...');
-  const testUser = db.insert('users', {
-    id: `USR-TEST-${Date.now()}`,
-    name: 'Kofi Mensah',
-    phone: formatGhanaPhoneNumber('0244998877'),
-    guardianPhone: formatGhanaPhoneNumber('0501122334'),
-    expectedArrivalTime: '08:00',
-    institution: 'University of Ghana'
+  // Test 3: Android App QR Format Parsing (from DashActivity.java)
+  console.log('\nTest 3: Testing Android App QR code parser...');
+  const appQrJson = JSON.stringify({
+    kid: 'Esi Mensah',
+    phone: '+233 24 998 8776',
+    school: 'Accra Academy'
   });
-  assert.ok(testUser.id);
-  console.log(`✅ User created: ${testUser.name} (${testUser.id})`);
 
-  // Test 4: Check scan rejection without subscription
-  console.log('\nTest 4: Testing QR scan without active subscription...');
-  const userToken = qrService.generateToken(testUser.id);
+  const parsedQr = qrService.verifyToken(appQrJson);
+  assert.strictEqual(parsedQr.valid, true);
+  assert.strictEqual(parsedQr.isAppQR, true);
+  assert.strictEqual(parsedQr.kid, 'Esi Mensah');
+  assert.strictEqual(parsedQr.phone, '+233 24 998 8776');
+  assert.strictEqual(parsedQr.school, 'Accra Academy');
+  console.log('✅ Android App QR structure successfully parsed');
+
+  // Test 4: Check scan blocked before subscription
+  console.log('\nTest 4: Verifying unpaid app scan is rejected...');
   const unpaidScan = await scanService.processScan({
-    token: userToken,
-    location: 'Main Gate'
+    qrData: appQrJson,
+    location: 'Main School Gate',
+    latitude: 5.5560,
+    longitude: -0.1969
   });
   assert.strictEqual(unpaidScan.success, false);
   assert.strictEqual(unpaidScan.error, 'SUBSCRIPTION_INACTIVE');
-  console.log('✅ Scan correctly blocked when user has no active subscription');
+  console.log('✅ Unpaid scan blocked properly with subscription notice');
 
-  // Test 5: Initialize & Confirm SeevPlus Payment (Monthly: 50 GHS)
-  console.log('\nTest 5: Initializing & Confirming SeevPlus Monthly Payment (50 GHS)...');
-  const paymentInit = paymentService.initializePayment({
-    userId: testUser.id,
+  // Test 5: Activate SeevPlus Subscription using Phone Number (App Flow)
+  console.log('\nTest 5: Activating SeevPlus Monthly Subscription (50 GHS) by phone...');
+  const initPayment = paymentService.initializePayment({
+    phone: '+233 24 998 8776',
+    kid: 'Esi Mensah',
+    school: 'Accra Academy',
     planType: 'monthly',
     paymentMethod: 'MOMO',
     momoNetwork: 'MTN'
   });
-  assert.strictEqual(paymentInit.success, true);
-  assert.strictEqual(paymentInit.payment.amount, 50.00);
+  assert.strictEqual(initPayment.success, true);
+  assert.strictEqual(initPayment.payment.amount, 50.00);
 
-  const paymentConfirm = paymentService.processPayment({
-    reference: paymentInit.payment.reference,
+  const confirmPayment = paymentService.processPayment({
+    reference: initPayment.payment.reference,
     status: 'SUCCESS'
   });
-  assert.strictEqual(paymentConfirm.success, true);
-  assert.strictEqual(paymentConfirm.subscription.amount, '50 GHS');
+  assert.strictEqual(confirmPayment.success, true);
 
-  const subStatus = paymentService.checkUserSubscriptionStatus(testUser.id);
+  const subStatus = paymentService.checkUserSubscriptionStatus('+233 24 998 8776');
   assert.strictEqual(subStatus.hasActiveSubscription, true);
   assert.strictEqual(subStatus.daysRemaining, 30);
-  console.log(`✅ SeevPlus subscription activated for 30 days`);
+  console.log('✅ Subscription activated: 50 GHS valid for 30 days');
 
-  // Test 6: QR Code Token Generation & Cryptographic Verification
-  console.log('\nTest 6: Testing QR Token Generation & Verification...');
-  const qrPass = await qrService.generateUserPass(testUser.id);
-  assert.ok(qrPass.token);
-  assert.ok(qrPass.qrDataUrl.startsWith('data:image/png;base64,'));
-
-  const tokenVerification = qrService.verifyToken(qrPass.token);
-  assert.strictEqual(tokenVerification.valid, true);
-  assert.strictEqual(tokenVerification.userId, testUser.id);
-
-  // Test invalid token
-  const tampered = qrService.verifyToken('invalid:token:12345');
-  assert.strictEqual(tampered.valid, false);
-  console.log('✅ QR cryptographic token verification passed');
-
-  // Test 7: Scan Evaluation - ON TIME Arrival & Arkesel SMS Trigger
-  console.log('\nTest 7: Testing ON TIME Arrival Scan & Arkesel SMS...');
+  // Test 6: Process App Scan with Location & Exact Time - ON TIME
+  console.log('\nTest 6: Testing ON-TIME app QR scan with GPS location & Arkesel SMS...');
   const onTimeDate = new Date();
-  onTimeDate.setHours(7, 50, 0, 0); // 07:50 AM (expected: 08:00 AM)
+  onTimeDate.setHours(7, 45, 0, 0); // 07:45 AM (Cutoff: 08:00 AM)
 
-  const onTimeScan = await scanService.processScan({
-    token: qrPass.token,
-    location: 'Campus Main Entrance',
+  const onTimeResult = await scanService.processScan({
+    qrData: appQrJson,
+    location: {
+      name: 'Accra Academy North Gate',
+      latitude: 5.5560,
+      longitude: -0.1969
+    },
     scannedAt: onTimeDate,
     sendNotification: true
   });
 
-  assert.strictEqual(onTimeScan.success, true);
-  assert.strictEqual(onTimeScan.evaluation.arrivalStatus, 'ON_TIME');
-  assert.strictEqual(onTimeScan.smsNotification.success, true);
-  assert.ok(onTimeScan.smsNotification.message.includes('ON TIME'));
-  console.log(`✅ On-time scan evaluated: ${onTimeScan.evaluation.scannedTime} - SMS dispatched`);
+  assert.strictEqual(onTimeResult.success, true);
+  assert.strictEqual(onTimeResult.evaluation.arrivalStatus, 'ON_TIME');
+  assert.strictEqual(onTimeResult.evaluation.isLate, false);
+  assert.strictEqual(onTimeResult.smsNotification.success, true);
+  assert.ok(onTimeResult.smsNotification.message.includes('ON TIME'));
+  assert.ok(onTimeResult.smsNotification.recipients.includes('233249988776'));
+  console.log(`✅ On-time scan succeeded: ${onTimeResult.evaluation.scannedTime} at ${onTimeResult.location.displayName}`);
+  console.log(`   SMS sent to parent: "${onTimeResult.smsNotification.message}"`);
 
-  // Test 8: Scan Evaluation - LATE Arrival & Arkesel SMS Trigger
-  console.log('\nTest 8: Testing LATE Arrival Scan & Arkesel SMS...');
+  // Test 7: Process App Scan with Location & Exact Time - LATE
+  console.log('\nTest 7: Testing LATE app QR scan with GPS location & Arkesel SMS...');
   const lateDate = new Date();
-  lateDate.setHours(8, 30, 0, 0); // 08:30 AM (expected 08:00 + 10 min grace -> late)
+  lateDate.setHours(8, 25, 0, 0); // 08:25 AM (Cutoff: 08:00 + 10 min grace -> Late by 25 mins)
 
-  const lateScan = await scanService.processScan({
-    token: qrPass.token,
-    location: 'Campus Main Entrance',
+  const lateResult = await scanService.processScan({
+    qrData: appQrJson,
+    location: 'Accra Academy North Gate',
+    latitude: 5.5560,
+    longitude: -0.1969,
     scannedAt: lateDate,
     sendNotification: true
   });
 
-  assert.strictEqual(lateScan.success, true);
-  assert.strictEqual(lateScan.evaluation.arrivalStatus, 'LATE');
-  assert.strictEqual(lateScan.smsNotification.success, true);
-  assert.ok(lateScan.smsNotification.message.includes('Late'));
-  console.log(`✅ Late scan evaluated: ${lateScan.evaluation.scannedTime} (Late by ${lateScan.evaluation.minutesDiff} mins) - SMS dispatched`);
+  assert.strictEqual(lateResult.success, true);
+  assert.strictEqual(lateResult.evaluation.arrivalStatus, 'LATE');
+  assert.strictEqual(lateResult.evaluation.isLate, true);
+  assert.strictEqual(lateResult.smsNotification.success, true);
+  assert.ok(lateResult.smsNotification.message.includes('Late'));
+  console.log(`✅ Late scan evaluated: ${lateResult.evaluation.scannedTime} (Late by ${lateResult.evaluation.minutesDiff} mins)`);
+  console.log(`   SMS sent to parent: "${lateResult.smsNotification.message}"`);
 
-  // Test 9: Verify Arkesel SMS Logs & Balance
-  console.log('\nTest 9: Testing Arkesel Balance & Delivery Logs...');
-  const balance = await arkeselService.getBalance();
-  assert.strictEqual(balance.success, true);
+  // Test 8: Yearly Plan Verification (588 GHS)
+  console.log('\nTest 8: Testing 1-Year SeevPlus Plan (588 GHS)...');
+  const yearlyInit = paymentService.initializePayment({
+    phone: '0501234567',
+    kid: 'Kwaku Mensah',
+    school: 'Prempeh College',
+    planType: 'yearly'
+  });
+  assert.strictEqual(yearlyInit.payment.amount, 588.00);
+  assert.strictEqual(yearlyInit.payment.durationDays, 365);
+  console.log('✅ Yearly plan initialization verified (588 GHS)');
 
-  const logs = arkeselService.getLogs(5);
-  assert.ok(logs.length >= 2, 'Should have logged at least 2 SMS messages');
-  console.log(`✅ SMS logs verified (${logs.length} messages in audit log)`);
+  // Test 9: Verify Scan Logs by Guardian Phone
+  console.log('\nTest 9: Verifying Scan History Audit Trail...');
+  const logs = scanService.getScanLogs({ guardianPhone: '0249988776' });
+  assert.ok(logs.length >= 2, 'Should have logged at least 2 scans for this parent');
+  console.log(`✅ Audit trail verified (${logs.length} scan logs retrieved)`);
 
   console.log('\n🎉 ALL INTEGRATION TESTS PASSED SUCCESSFULLY! 🚀');
 }

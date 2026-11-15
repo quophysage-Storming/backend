@@ -4,22 +4,38 @@ const qrService = require('../services/qrService');
 class ScanController {
   /**
    * Process a QR code scan at entrance/checkpoint
+   * Accepts Android App QR JSON {"kid":"...","phone":"...","school":"..."},
+   * along with device GPS coordinates and location metadata.
    */
   async processScan(req, res) {
     try {
-      const { token, location, scannedAt, sendNotification = true } = req.body;
+      const {
+        token,
+        qrData,
+        location,
+        latitude,
+        longitude,
+        scannedAt,
+        sendNotification = true,
+        scannerDevice
+      } = req.body;
 
-      if (!token) {
+      const rawInput = token || qrData;
+
+      if (!rawInput) {
         return res.status(400).json({
-          error: 'QR code token or payload is required'
+          error: 'QR code payload (qrData or token) is required'
         });
       }
 
       const result = await scanService.processScan({
-        token,
+        token: rawInput,
         location,
+        latitude,
+        longitude,
         scannedAt,
-        sendNotification
+        sendNotification,
+        scannerDevice
       });
 
       if (!result.success) {
@@ -53,9 +69,10 @@ class ScanController {
    */
   getScanLogs(req, res) {
     try {
-      const { userId, limit } = req.query;
+      const { userId, guardianPhone, phone, limit } = req.query;
       const logs = scanService.getScanLogs({
         userId,
+        guardianPhone: guardianPhone || phone,
         limit: limit ? parseInt(limit, 10) : 50
       });
 

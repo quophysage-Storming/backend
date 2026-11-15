@@ -21,19 +21,32 @@ class PaymentController {
 
   /**
    * Initialize SeevPlus payment for monthly or yearly subscription
+   * Supports either userId or (phone + kid + school) from Android App
    */
   initializePayment(req, res) {
     try {
-      const { userId, planType, paymentMethod = 'MOMO', momoNumber, momoNetwork } = req.body;
+      const {
+        userId,
+        phone,
+        kid,
+        school,
+        planType,
+        paymentMethod = 'MOMO',
+        momoNumber,
+        momoNetwork
+      } = req.body;
 
-      if (!userId || !planType) {
+      if ((!userId && !phone && !momoNumber) || !planType) {
         return res.status(400).json({
-          error: 'userId and planType ("monthly" or "yearly") are required'
+          error: 'Either userId or phone/momoNumber is required, along with planType ("monthly" or "yearly")'
         });
       }
 
       const result = paymentService.initializePayment({
         userId,
+        phone,
+        kid,
+        school,
         planType,
         paymentMethod,
         momoNumber,
@@ -65,15 +78,19 @@ class PaymentController {
   }
 
   /**
-   * Check active subscription status for a given user
+   * Check active subscription status for a given user or phone number
    */
   checkSubscription(req, res) {
     try {
-      const { userId } = req.params;
-      const status = paymentService.checkUserSubscriptionStatus(userId);
+      const identifier = req.params.identifier || req.params.userId || req.query.phone || req.query.userId;
+      if (!identifier) {
+        return res.status(400).json({ error: 'User ID or Phone Number is required' });
+      }
+
+      const status = paymentService.checkUserSubscriptionStatus(identifier);
       res.json({
         success: true,
-        userId,
+        identifier,
         ...status
       });
     } catch (err) {
@@ -86,11 +103,14 @@ class PaymentController {
    */
   getPayments(req, res) {
     try {
-      const { userId, limit = 50 } = req.query;
+      const { userId, phone, limit = 50 } = req.query;
       let payments = db.getAll('payments');
 
       if (userId) {
         payments = payments.filter(p => p.userId === userId);
+      }
+      if (phone) {
+        payments = payments.filter(p => p.userPhone === phone);
       }
 
       res.json({

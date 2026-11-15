@@ -27,11 +27,35 @@ class PaymentService {
 
   /**
    * Initialize a SeevPlus payment for OnTime Arrival subscription
+   * Supports either userId or (phone + kid + school from the Android app)
    */
-  initializePayment({ userId, planType, paymentMethod = 'MOMO', momoNumber, momoNetwork }) {
-    const user = db.findOne('users', u => u.id === userId);
+  initializePayment({ userId, phone, kid, school, planType, paymentMethod = 'MOMO', momoNumber, momoNetwork }) {
+    let user = null;
+
+    if (userId) {
+      user = db.findOne('users', u => u.id === userId);
+    }
+
+    // Lookup or auto-register by parent's phone number from Android App
+    if (!user && (phone || momoNumber)) {
+      const cleanPhone = formatGhanaPhoneNumber(phone || momoNumber);
+      user = db.findOne('users', u => u.guardianPhone === cleanPhone || u.phone === cleanPhone);
+
+      if (!user) {
+        user = db.insert('users', {
+          id: `USR-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`,
+          name: kid ? kid.trim() : 'Student',
+          phone: cleanPhone,
+          guardianPhone: cleanPhone,
+          institution: school ? school.trim() : 'School Checkpoint',
+          expectedArrivalTime: config.ontime.defaultExpectedArrivalTime,
+          role: 'student'
+        });
+      }
+    }
+
     if (!user) {
-      throw new Error(`User with ID ${userId} not found`);
+      throw new Error('User not found. Please provide userId or phone number.');
     }
 
     const plan = this.getPlan(planType);
@@ -39,7 +63,7 @@ class PaymentService {
       throw new Error('Invalid plan selected. Choose "monthly" (50 GHS) or "yearly" (588 GHS)');
     }
 
-    const targetPhone = momoNumber || user.phone;
+    const targetPhone = momoNumber || phone || user.guardianPhone || user.phone;
     const formattedPhone = formatGhanaPhoneNumber(targetPhone);
     const network = momoNetwork || detectNetwork(formattedPhone);
 
@@ -48,7 +72,7 @@ class PaymentService {
     const paymentRecord = db.insert('payments', {
       id: uuidv4(),
       reference,
-      userId,
+      userId: user.id,
       userPhone: formattedPhone,
       userName: user.name,
       planId: plan.id,
@@ -71,9 +95,12 @@ class PaymentService {
         amount: plan.amount,
         currency: plan.currency,
         plan: plan.name,
+        planType: plan.billingCycle,
         durationDays: plan.durationDays,
         network,
         phoneNumber: formattedPhone,
+        userId: user.id,
+        userName: user.name,
         status: 'PENDING',
         ussdPromptInstruction: `A Mobile Money prompt of ${plan.amount} GHS will be sent to ${formattedPhone} (${network}). Approve with your MoMo PIN.`
       }
@@ -157,6 +184,7 @@ class PaymentService {
       subscription: {
         id: subscription.id,
         plan: plan.name,
+        planType: plan.billingCycle,
         amount: `${plan.amount} ${plan.currency}`,
         startDate: subscription.startDate,
         endDate: subscription.endDate,
@@ -166,11 +194,20 @@ class PaymentService {
   }
 
   /**
-   * Get active subscription for a user
+   * Get active subscription for a user (by userId or phone)
    */
-  getActiveSubscription(userId) {
+  getActiveSubscription(userIdOrPhone) {
+    if (!userIdOrPhone) return null;
+
     const now = new Date();
-    const subs = db.find('subscriptions', s => s.userId === userId && s.status === 'ACTIVE');
+    const cleanPhone = formatGhanaPhoneNumber(userIdOrPhone);
+
+    const subs = db.find('subscriptions', s => {
+      const matchUser = s.userId === userIdOrPhone;
+      const matchPhone = cleanPhone && (s.userPhone === cleanPhone || s.userPhone === userIdOrPhone);
+      return (matchUser || matchPhone) && s.status === 'ACTIVE';
+    });
+
     if (!subs || subs.length === 0) return null;
 
     // Check expiry
@@ -187,10 +224,10 @@ class PaymentService {
   }
 
   /**
-   * Check user subscription status
+   * Check user subscription status (by userId or phone)
    */
-  checkUserSubscriptionStatus(userId) {
-    const sub = this.getActiveSubscription(userId);
+  checkUserSubscriptionStatus(userIdOrPhone) {
+    const sub = this.getActiveSubscription(userIdOrPhone);
     if (!sub) {
       return {
         hasActiveSubscription: false,
